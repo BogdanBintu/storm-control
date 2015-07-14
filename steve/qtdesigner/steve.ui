@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>1148</width>
-    <height>831</height>
+    <width>1102</width>
+    <height>850</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -88,6 +88,7 @@
                 <property name="frameShadow">
                  <enum>QFrame::Raised</enum>
                 </property>
+                <zorder>tilesGroupBox</zorder>
                </widget>
               </item>
              </layout>
@@ -276,6 +277,55 @@
                </layout>
               </item>
               <item>
+               <layout class="QHBoxLayout" name="horizontalLayout_11">
+                <item>
+                 <widget class="QLabel" name="foverlapLabel">
+                  <property name="text">
+                   <string>Fraction of overlap:</string>
+                  </property>
+                  <property name="alignment">
+                   <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QDoubleSpinBox" name="foverlapSpinBox">
+                  <property name="sizePolicy">
+                   <sizepolicy hsizetype="MinimumExpanding" vsizetype="Fixed">
+                    <horstretch>0</horstretch>
+                    <verstretch>0</verstretch>
+                   </sizepolicy>
+                  </property>
+                  <property name="minimum">
+                   <double>0.000000000000000</double>
+                  </property>
+                  <property name="maximum">
+                   <double>1.000000000000000</double>
+                  </property>
+                  <property name="singleStep">
+                   <double>0.010000000000000</double>
+                  </property>
+                  <property name="value">
+                   <double>0.050000000000000</double>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <spacer name="horizontalSpacer_3">
+                  <property name="orientation">
+                   <enum>Qt::Horizontal</enum>
+                  </property>
+                  <property name="sizeHint" stdset="0">
+                   <size>
+                    <width>40</width>
+                    <height>20</height>
+                   </size>
+                  </property>
+                 </spacer>
+                </item>
+               </layout>
+              </item>
+              <item>
                <layout class="QHBoxLayout" name="horizontalLayout_10">
                 <item>
                  <widget class="QPushButton" name="getStagePosButton">
@@ -322,7 +372,7 @@
             </widget>
            </item>
            <item>
-            <widget class="ObjectivesGroupBox" name="objectivesGroupBox">
+            <widget class="QGroupBox" name="objectivesGroupBox">
              <property name="minimumSize">
               <size>
                <width>250</width>
@@ -338,10 +388,70 @@
              <property name="title">
               <string>Objective Settings</string>
              </property>
+             <layout class="QGridLayout" name="gridLayout_4">
+              <property name="leftMargin">
+               <number>0</number>
+              </property>
+              <property name="topMargin">
+               <number>9</number>
+              </property>
+              <property name="rightMargin">
+               <number>0</number>
+              </property>
+              <item row="0" column="1" colspan="2">
+               <widget class="QFrame" name="objectivesFrame">
+                <property name="frameShape">
+                 <enum>QFrame::StyledPanel</enum>
+                </property>
+                <property name="frameShadow">
+                 <enum>QFrame::Raised</enum>
+                </property>
+               </widget>
+              </item>
+              <item row="2" column="2">
+               <widget class="QComboBox" name="magComboBox">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="focusPolicy">
+                 <enum>Qt::ClickFocus</enum>
+                </property>
+                <property name="editable">
+                 <bool>false</bool>
+                </property>
+               </widget>
+              </item>
+              <item row="2" column="1">
+               <widget class="QLabel" name="objectiveLabel">
+                <property name="text">
+                 <string>Current Objective:</string>
+                </property>
+                <property name="alignment">
+                 <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
+                </property>
+               </widget>
+              </item>
+              <item row="2" column="0">
+               <spacer name="horizontalSpacer">
+                <property name="orientation">
+                 <enum>Qt::Horizontal</enum>
+                </property>
+                <property name="sizeHint" stdset="0">
+                 <size>
+                  <width>40</width>
+                  <height>20</height>
+                 </size>
+                </property>
+               </spacer>
+              </item>
+             </layout>
             </widget>
            </item>
            <item>
-            <widget class="QGroupBox" name="miscGroupBox">
+            <widget class="QGroupBox" name="groupBox_2">
              <property name="minimumSize">
               <size>
                <width>0</width>
@@ -503,8 +613,8 @@
                   <rect>
                    <x>0</x>
                    <y>0</y>
-                   <width>254</width>
-                   <height>533</height>
+                   <width>252</width>
+                   <height>535</height>
                   </rect>
                  </property>
                 </widget>
@@ -624,8 +734,8 @@
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>1148</width>
-     <height>25</height>
+     <width>1102</width>
+     <height>26</height>
     </rect>
    </property>
    <widget class="QMenu" name="menuFile">
@@ -635,7 +745,7 @@
     <addaction name="actionSet_Working_Directory"/>
     <addaction name="separator"/>
     <addaction name="actionDelete_Images"/>
-    <addaction name="actionLoad_Movie"/>
+    <addaction name="actionLoad_Dax"/>
     <addaction name="actionLoad_Mosaic"/>
     <addaction name="actionLoad_Positions"/>
     <addaction name="actionSave_Mosaic"/>
@@ -649,6 +759,7 @@
      <string>View</string>
     </property>
     <addaction name="actionAdjust_Contrast"/>
+    <addaction name="actionQuadView"/>
    </widget>
    <addaction name="menuFile"/>
    <addaction name="menuView"/>
@@ -725,9 +836,9 @@
     <string>Ctrl+I</string>
    </property>
   </action>
-  <action name="actionLoad_Movie">
+  <action name="actionLoad_Dax">
    <property name="text">
-    <string>Load Movie</string>
+    <string>Load Dax</string>
    </property>
    <property name="shortcut">
     <string>Ctrl+L</string>
@@ -746,15 +857,12 @@
     <string>Ctrl+C</string>
    </property>
   </action>
+  <action name="actionQuadView">
+   <property name="text">
+    <string>QuadView</string>
+   </property>
+  </action>
  </widget>
- <customwidgets>
-  <customwidget>
-   <class>ObjectivesGroupBox</class>
-   <extends>QGroupBox</extends>
-   <header>objectives</header>
-   <container>1</container>
-  </customwidget>
- </customwidgets>
  <tabstops>
   <tabstop>xStartPosSpinBox</tabstop>
   <tabstop>yStartPosSpinBox</tabstop>

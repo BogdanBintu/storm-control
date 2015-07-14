@@ -14,6 +14,8 @@ import os
 
 from PyQt4 import QtCore, QtGui
 
+import sc_library.daxspereader as datareader
+
 
 ## MultifieldView
 #
@@ -92,8 +94,10 @@ class MultifieldView(QtGui.QGraphicsView):
     #
     def changeContrast(self, contrast_range):
         for item in self.image_items:
-            item.pixmap_min = contrast_range[0]
-            item.pixmap_max = contrast_range[1]
+            #item.pixmap_min = contrast_range[0]
+            #item.pixmap_max = contrast_range[1]
+            item.pixmap_mins = contrast_range[0]
+            item.pixmap_maxs = contrast_range[1]
             item.createPixmap()
 
     ## changeImageMagnifications
@@ -149,8 +153,14 @@ class MultifieldView(QtGui.QGraphicsView):
     #
     def getContrast(self):
         if len(self.image_items) >= 1:
-            min_value = min(item.pixmap_min for item in self.image_items)
-            max_value = max(item.pixmap_max for item in self.image_items)
+            # Deal with old format by extending the min and max to all views
+            for item in self.image_items:
+                if hasattr(item, 'pixmap_mins')==False:
+                    item.pixmap_mins = [item.pixmap_min for i in range(4)]
+                    item.pixmap_maxs = [item.pixmap_max for i in range(4)]
+            # Report contrasts
+            min_value = [min(item.pixmap_mins[i] for item in self.image_items) for i in range(4)]
+            max_value = [max(item.pixmap_maxs[i] for item in self.image_items) for i in range(4)]
             return [min_value, max_value]
         else:
             return [None, None]
@@ -366,27 +376,38 @@ class viewImageItem(QtGui.QGraphicsItem):
     # Converts the numpy image from HAL to a QtGui.QPixmap.
     #
     def createPixmap(self):
+        # This is an non-elegant solution to deal with loading previous mosaics. Needs update.
+        if hasattr(self, 'cols'):
+        # This has been configured to deal with quad-view or single view images in initializeWithImageObject function
+            frame_sep = self.data.copy()
+            cols = self.cols
+            pixmap_mins = self.pixmap_mins
+            pixmap_maxs = self.pixmap_maxs
+        else:
+            # If the above fail means that the image loaded is old format
+            frame_sep = numpy.array([self.data])
+            cols = numpy.array([[1,1,1]])
+            pixmap_mins = [self.pixmap_min for i in range(4)]
+            pixmap_maxs = [self.pixmap_max for i in range(4)]
         
-        # This just undoes the transpose that we applied when the image was loaded. It might
-        # make more sense not to transpose the image in the first place, but this is the standard
-        # for the storm-analysis project so we maintain that here.
-        frame = numpy.transpose(self.data.copy())
-
+        # rescale each view according to pixmap_min and pixmap_max
+        frame_sep=frame_sep.astype(float)
+        for i in range(len(frame_sep)):
+            frame_sep[i]=(frame_sep[i]-float(pixmap_mins[i]))/float(pixmap_maxs[i] - pixmap_mins[i])
+        frame_sep[(frame_sep>1.)]=1.
+        frame_sep[(frame_sep<0.)]=0.
+        # contract to color space: [0,1]
+        frame = numpy.dot(numpy.transpose(frame_sep),cols)
         # Rescale & convert to 8bit
         frame = numpy.ascontiguousarray(frame, dtype = numpy.float32)
-        frame = 255.0 * (frame - float(self.pixmap_min))/float(self.pixmap_max - self.pixmap_min)
-        frame[(frame > 255.0)] = 255.0
-        frame[(frame < 0.0)] = 0.0
+        frame = 255.0 * frame
         frame = frame.astype(numpy.uint8)
 
         # Create the pixmap
-        w, h = frame.shape
-        image = QtGui.QImage(frame.data, h, w, QtGui.QImage.Format_Indexed8)
+        w, h = frame.shape[:2]
+        image = QtGui.QImage(frame.data, h, w, h*3, QtGui.QImage.Format_RGB888)
         image.ndarray = frame
-        for i in range(256):
-            image.setColor(i, QtGui.QColor(i,i,i).rgb())
         self.pixmap = QtGui.QPixmap.fromImage(image)
-
     ## getMagnification
     #
     # @return The magnification of the image.
@@ -442,14 +463,27 @@ class viewImageItem(QtGui.QGraphicsItem):
     # @param image A capture.Image object.
     #
     def initializeWithImageObject(self, image):
-        self.data = image.data
-        self.height = image.height
-        self.parameters_file = image.parameters_file
+        # Decide whether the image was shot using quadview. This is not elegant, will consider alternatives.
+        # The annoying bit is that new fields were added in steve to instances of the image class.
+        if hasattr(image,"dataQV"):
+                self.data = image.dataQV
+                self.cols = image.activeCols
+                self.pixmap_mins = image.pixmap_mins
+                self.pixmap_maxs = image.pixmap_maxs
+        else:
+            self.data = numpy.array([image.data])
+            self.cols = numpy.array([[1,1,1]])
+            self.pixmap_mins = [image.image_min for i in range(4)]
+            self.pixmap_maxs = [image.image_max for i in range(4)]
+        # Common paramaters
         self.pixmap_min = image.image_min
         self.pixmap_max = image.image_max
+        self.height = image.height
+        self.parameters_file = image.parameters_file
         self.width = image.width
         self.x_um = image.x_um
         self.y_um = image.y_um
+        
         self.createPixmap()
 
         self.setPixmapGeometry()

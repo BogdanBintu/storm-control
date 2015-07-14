@@ -197,11 +197,7 @@ class Positions(QtGui.QListView):
 
         PositionItem.deselected_pen.setWidth(parameters.pen_width)
         PositionItem.selected_pen.setWidth(parameters.pen_width)
-
-        # FIXME: Need to do this properly.
-        #rectangle_size = parameters.rectangle_size/parameters.pixels_to_um
-        rectangle_size = parameters.rectangle_size/0.160
-        
+        rectangle_size = parameters.rectangle_size/parameters.pixels_to_um
         PositionItem.x_size = rectangle_size
         PositionItem.y_size = rectangle_size
 

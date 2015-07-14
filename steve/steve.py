@@ -4,29 +4,28 @@
 #
 # A utility for creating image mosaics and imaging array tomography type samples.
 #
-# Since we usually use a 100x objective, everything is defined relative to this
-# objective. This means among other things that internally we use a magnification
-# that is adjusted so that the magnification of the 100x objective is 1.0.
-#
-# Hazen 07/15
+# Hazen 07/13
 #
 
 import os
 import sys
 import re
+import numpy
+import pickle
 from PyQt4 import QtCore, QtGui
+
 
 # Debugging
 import sc_library.hdebug as hdebug
 
 # UIs.
 import qtdesigner.steve_ui as steveUi
-from qtdesigner.adjust_contrast_dialog_ui import Ui_Dialog as AdjustContrastDialog_Ui
+from qtdesigner.adjust_contrast_QV_dialog_ui import Ui_Dialog as AdjustContrastDialog_Ui
+from qtdesigner.quad_view_dialog_ui import Ui_Dialog as Ui_QuadView
 import qtRegexFileDialog
 
 # Graphics
 import mosaicView
-import objectives
 import positions
 import sections
 
@@ -37,118 +36,854 @@ import capture
 import coord
 import sc_library.parameters as params
 
+
+class DragView(QtGui.QFrame):
+    ## __init__
+    #
+    # Connect and configure sliders.
+    # 
+    @hdebug.debug
+    def __init__(self,parent,labelName,coordinates,additionalparent):
+        QtGui.QFrame.__init__(self,parent)
+        # construct frame for view
+        self.setGeometry(QtCore.QRect(coordinates[0], coordinates[1], coordinates[2], coordinates[3]))
+        self.setAutoFillBackground(False)
+        self.setFrameShape(QtGui.QFrame.StyledPanel)
+        self.setFrameShadow(QtGui.QFrame.Plain)
+        # construct label for view
+        self.ViewLabel = QtGui.QLabel(self)
+        self.ViewLabel.setGeometry(QtCore.QRect(10, 10, 40, 40))
+        self.ViewLabel.setText(labelName)
+        self.additionalparent=additionalparent
+        
+    ## mousePressEvent
+    #
+    # Super the press button function to find the mouse position
+    # 
+    @hdebug.debug
+    def mousePressEvent(self, event):
+        self.__mousePressPos = None
+        self.__mouseMovePos = None
+        if event.button() == QtCore.Qt.LeftButton:
+            self.__mousePressPos = event.globalPos()
+            self.__mouseMovePos = event.globalPos()
+
+        super(DragView, self).mousePressEvent(event)
+        
+    ## mouseMoveEvent
+    #
+    # Super the click-and-move function to move the object
+    #
+    @hdebug.debug
+    def mouseMoveEvent(self, event):
+        if event.buttons() == QtCore.Qt.LeftButton:
+            # adjust offset from clicked point to origin of widget
+            currPos = self.mapToGlobal(self.pos())
+            globalPos = event.globalPos()
+            diff = globalPos - self.__mouseMovePos
+            newPos = self.mapFromGlobal(currPos + diff)
+            self.move(newPos)
+
+            self.__mouseMovePos = globalPos
+
+        super(DragView, self).mouseMoveEvent(event)
+        
+    ## mouseReleaseEvent
+    #
+    # Super the release function to update the composite image
+    #
+    @hdebug.debug
+    def mouseReleaseEvent(self, event):
+        self.additionalparent.updateQVImage()
+        super(DragView, self).mouseReleaseEvent(event)
+    
+    ## mouseMoveEvent
+    #
+    # Super the click-and-move function to move the object
+    #
+    @hdebug.debug   
+    def getCoordinates(self):
+        return self.geometry().getCoords()[:2]
+
+class QuadViewDialog(QtGui.QDialog, Ui_QuadView):
+    ## __init__
+    #
+    # @param title_text The text of the title of the dialog box
+    # @param nr_views_ The number of views
+    # @param QVsize_x_ The size along the x axis of the combined view
+    # @param QVsize_y_ The size along the y axis of the combined view
+    # @param views_coords_ The coordinates of the left-up corner of the views
+    # @param cols_ The colors of the the views in the combined image
+    # @param parent The PyQt parent of this object, default is None.
+    #
+    def __init__(self, parent = None,
+                 title_text = "QuadView",
+                 nr_views_ = 2,
+                 QVsize_x_ = 256,
+                 QVsize_y_ = 256,
+                 views_coords_=[[0,0],[0,256],[256,0],[256,256]],
+                 cols_=[[1.,0.,0.],[0.,0.,1.],[0.,1.,0.],[1.,1.,0.]],
+                 scale_min_max = [0,16000],
+                 default_min_max = [[0,0,0,0],[16000,16000,16000,16000]]
+                 ):
+        QtGui.QDialog.__init__(self,parent)
+        self.setupUi(self)
+        # Update window title.
+        self.setWindowTitle(title_text)
+        # variables:
+        self.scale_min_max = scale_min_max
+        self.default_min_max = default_min_max
+        self.views_coords = numpy.array(views_coords_)
+        self.QVsize_x = QVsize_x_
+        self.QVsize_y = QVsize_y_
+        self.cols = numpy.array(cols_)
+        self.nr_views = nr_views_
+        self.current_center_x_um = 0.
+        self.current_center_y_um = 0.
+        self.parent = parent
+        self.frame = None
+        self.frames = []
+        # Disconnect comms of the parent
+        self.parent.toggleTakingPicturesStatus(False)
+        self.parent.comm.commDisconnect()
+        # Initialize QV communication
+        self.comm = capture.Capture(parent.parameters)
+        # Set QV configurations
+        self.numViews.setValue(nr_views_)
+        self.QVSizeX.setValue(QVsize_x_)
+        self.QVSizeY.setValue(QVsize_y_)
+        # Set QV signals
+        self.QVSizeX.valueChanged.connect(self.handleSizeChange)
+        self.QVSizeY.valueChanged.connect(self.handleSizeChange)
+        self.numViews.valueChanged.connect(self.handleSizeChange)
+        self.buttonBox.accepted.connect(self.dump_save)
+        self.colObj_1.clicked.connect(self.handleCol1Change)
+        self.colObj_2.clicked.connect(self.handleCol2Change)
+        self.colObj_3.clicked.connect(self.handleCol3Change)
+        self.colObj_4.clicked.connect(self.handleCol4Change)
+        self.save_parms_btn.clicked.connect(self.handleSaveQV)
+        self.load_parms_btn.clicked.connect(self.handleLoadQV)
+        # Set QV comms
+        self.comm.getPositionComplete.connect(self.handleGetPositionComplete)
+        self.comm.captureComplete.connect(self.addImageOriginal)
+        # comms for sliders and their spin boxes
+        self.high_contrast_sliders = [self.high_contrast_slider_1,self.high_contrast_slider_2,self.high_contrast_slider_3,self.high_contrast_slider_4]
+        self.low_contrast_sliders = [self.low_contrast_slider_1,self.low_contrast_slider_2,self.low_contrast_slider_3,self.low_contrast_slider_4]
+        self.high_spin_boxes = [self.high_spin_box_1,self.high_spin_box_2,self.high_spin_box_3,self.high_spin_box_4]
+        self.low_spin_boxes = [self.low_spin_box_1,self.low_spin_box_2,self.low_spin_box_3,self.low_spin_box_4]
+        
+        # Take a picture at the current position and work with that
+        self.comm.commConnect()
+        self.comm.getPosition()
+        if self.comm.setDirectory(parent.parameters.directory):
+            self.comm.captureStart(self.current_center_x_um, self.current_center_y_um)
+        else:
+            self.comm.commDisconnect()
+            
+    ## connect_configure_sliders
+    #
+    # Connect and configure sliders.
+    # 
+    @hdebug.debug    
+    def connect_configure_sliders(self):
+        counter = 0
+        for slider in self.high_contrast_sliders:
+            #connect
+            slider.sliderMoved.connect(self.handleHighSliderUpdate)
+            slider.sliderReleased.connect(self.handleHighSliderRelease)
+            #configure
+            slider.setRange(self.scale_min_max[0], self.scale_min_max[1])
+            slider.setSliderPosition(self.default_min_max[1][counter])
+            counter+=1
+        counter = 0
+        for slider in self.low_contrast_sliders:
+            #connect
+            slider.sliderMoved.connect(self.handleLowSliderUpdate)
+            slider.sliderReleased.connect(self.handleLowSliderRelease)
+            #configure
+            slider.setRange(self.scale_min_max[0], self.scale_min_max[1])
+            slider.setSliderPosition(self.default_min_max[0][counter])
+            counter+=1
+            
+    ## connect_configure_spin_boxes
+    #
+    # Connect and configure spinboxes associated with the sliders
+    # 
+    @hdebug.debug
+    def connect_configure_spin_boxes(self):
+        counter = 0
+        for box in self.high_spin_boxes:
+            #connect
+            box.valueChanged.connect(self.handleHighSpinBoxUpdate)
+            #configure
+            box.setRange(self.scale_min_max[0], self.scale_min_max[1])
+            box.setValue(self.default_min_max[1][counter])
+            box.setSingleStep(1)
+            counter+=1
+        counter = 0
+        for box in self.low_spin_boxes:
+            #connect
+            box.valueChanged.connect(self.handleLowSpinBoxUpdate)
+            #configure
+            box.setRange(self.scale_min_max[0], self.scale_min_max[1])
+            box.setValue(self.default_min_max[0][counter])
+            box.setSingleStep(1)
+            counter+=1
+
+    ## getValues
+    #
+    # Return the values of the directory and file filter text boxes
+    #
+    # @return The minimum and maximum contrast values set by the user for all quad-views
+    @hdebug.debug
+    def getValues(self):
+        return [[box.value() for box in self.low_spin_boxes],[box.value() for box in self.high_spin_boxes]]
+
+
+    ## handleHighSliderRelease
+    #
+    # Coerce sliders value to new range upon release
+    #
+    @hdebug.debug
+    def handleHighSliderRelease(self):
+        for i in range(len(self.high_contrast_sliders)):
+            high_contrast_slider = self.high_contrast_sliders[i]
+            low_spin_box = self.low_spin_boxes[i]
+            high_spin_box = self.high_spin_boxes[i]
+            
+            new_value = high_contrast_slider.value()
+            low_value = low_spin_box.value()
+            if new_value > low_value: # Coerce to larger than low contrast
+                high_spin_box.setValue(new_value)
+            else:
+                high_contrast_slider.setValue(low_value+1)
+                high_spin_box.setMinimum(low_value+1)
+
+    ## handleLowSliderRelease
+    #
+    # Coerce sliders value to new range upon release
+    #
+    @hdebug.debug
+    def handleLowSliderRelease(self):
+        for i in range(len(self.low_contrast_sliders)):
+            low_contrast_slider = self.low_contrast_sliders[i]
+            low_spin_box = self.low_spin_boxes[i]
+            high_spin_box = self.high_spin_boxes[i]
+            
+            new_value = low_contrast_slider.value()
+            high_value = high_spin_box.value()
+            if new_value < high_value: # Coerce to smaller than high contrast
+                low_spin_box.setValue(new_value)
+            else:
+                low_contrast_slider.setValue(high_value-1)
+                low_spin_box.setMaximum(high_value-1)
+    
+    ## handleHighSliderUpdate
+    #
+    # Handle movement of the high contrast slider
+    #
+    @hdebug.debug
+    def handleHighSliderUpdate(self, dummy):
+        for i in range(len(self.high_contrast_sliders)):
+            self.high_spin_boxes[i].setValue(self.high_contrast_sliders[i].value())
+
+    ## handleLowSliderUpdate
+    #
+    # Handle movement of the low contrast sliders
+    #
+    @hdebug.debug
+    def handleLowSliderUpdate(self, dummy):
+        for i in range(len(self.low_contrast_sliders)):
+            self.low_spin_boxes[i].setValue(self.low_contrast_sliders[i].value())
+
+    ## handleHighSpinBoxUpdate
+    #
+    # Handle user adjustment of the high contrast spin box
+    #
+    @hdebug.debug
+    def handleHighSpinBoxUpdate(self, dummy):
+        for i in range(len(self.high_contrast_sliders)):
+            self.high_contrast_sliders[i].setValue(self.high_spin_boxes[i].value())
+        if self.connectQV_On:
+            self.pixmap_mins,self.pixmap_maxs=self.getValues()
+            self.updateQVImage()
+            
+    ## handleLowSpinBoxUpdate
+    #
+    # Handle user adjustment of the low contrast spin box
+    #
+    @hdebug.debug
+    def handleLowSpinBoxUpdate(self, dummy):
+        for i in range(len(self.low_contrast_sliders)):
+            self.low_contrast_sliders[i].setValue(self.low_spin_boxes[i].value())
+        if self.connectQV_On:
+            self.pixmap_mins,self.pixmap_maxs=self.getValues()
+            self.updateQVImage()
+            
+    ## handleSizeChange
+    #
+    # Handles a change in the size or number of the quadviews
+    #
+    # @param num Dummy parameter.
+    #
+    @hdebug.debug
+    def handleSizeChange(self, num):
+        if self.connectQV_On:
+            self.QVsize_x = self.QVSizeX.value()
+            self.QVsize_y = self.QVSizeY.value()
+            self.nr_views = self.numViews.value()
+            self.updateViews()
+            self.updateQVImage()
+            
+    ## handleSaveQV
+    #
+    # Saves paramaters of the QV.
+    #
+    @hdebug.debug
+    def handleSaveQV(self,Dummy):
+        QV_filename = str(QtGui.QFileDialog.getSaveFileName(self,
+                                                                "Save QV", 
+                                                                self.parent.parameters.directory,
+                                                                "*.qvset"))
+        if QV_filename:
+            save_dic = {}
+            [save_dic["activeCols"],save_dic["cols"],save_dic["nr_views"],
+             save_dic["QVsize_x"],save_dic["QVsize_y"],save_dic["finalTrims"],
+             save_dic["pixmap_mins"],save_dic["pixmap_maxs"],save_dic["views_coords"]]=[self.activeCols,self.cols,self.nr_views,
+             self.QVsize_x,self.QVsize_y,self.finalTrims,
+             self.pixmap_mins,self.pixmap_maxs,self.views_coords]
+            pickle.dump(save_dic,open(QV_filename,'wb'))
+            
+    ## handleLoadQV
+    #
+    # Loads paramaters of the QV.
+    #
+    @hdebug.debug
+    def handleLoadQV(self,Dummy):
+        QV_filename = str(QtGui.QFileDialog.getOpenFileName(self,
+                                                                "Load QV", 
+                                                                self.parent.parameters.directory,
+                                                                "*.qvset"))
+        if QV_filename:
+            # load dictionary
+            save_dic=pickle.load(open(QV_filename,'rb'))
+            [self.activeCols,self.cols,self.nr_views,
+             self.QVsize_x,self.QVsize_y,self.finalTrims,
+             self.pixmap_mins,self.pixmap_maxs,self.views_coords]=[save_dic["activeCols"],save_dic["cols"],save_dic["nr_views"],
+             save_dic["QVsize_x"],save_dic["QVsize_y"],save_dic["finalTrims"],
+             save_dic["pixmap_mins"],save_dic["pixmap_maxs"],save_dic["views_coords"]]
+            # update everything in QV 
+            self.connectQV_On = False #This ensures changes in values of spin boxes/sliders don't overwrite with the loaded data
+            self.numViews.setValue(self.nr_views)
+            self.QVSizeX.setValue(self.QVsize_x)
+            self.QVSizeY.setValue(self.QVsize_y)
+            for i in range(4):
+                self.high_contrast_sliders[i].setSliderPosition(self.pixmap_maxs[i])
+                self.low_contrast_sliders[i].setSliderPosition(self.pixmap_mins[i])
+                self.high_spin_boxes[i].setValue(self.pixmap_maxs[i])
+                self.low_spin_boxes[i].setValue(self.pixmap_mins[i])
+            self.addColorsToButtons()
+            self.updateViews()
+            self.updateQVImage()
+            self.connectQV_On = True
+            
+    ## handleGetPositionComplete
+    #
+    # Updates the QV dialog of the stage position
+    #
+    @hdebug.debug 
+    def handleGetPositionComplete(self, a_point):
+        self.current_center_x_um, self.current_center_y_um = a_point.x_um, a_point.y_um
+        
+    ## handleCol1Change
+    #
+    # wrappers for the color change
+    #
+    # @param num Dummy parameter.
+    #
+    @hdebug.debug
+    def handleCol1Change(self,num):
+        self.handleColChange(0)
+    ## handleCol2Change
+    #
+    # wrappers for the color change
+    #
+    # @param num Dummy parameter.
+    #
+    @hdebug.debug
+    def handleCol2Change(self,num):
+        self.handleColChange(1)
+    ## handleCol3Change
+    #
+    # wrappers for the color change
+    #
+    # @param num Dummy parameter.
+    #
+    @hdebug.debug
+    def handleCol3Change(self,num):
+        self.handleColChange(2)
+    ## handleCol4Change
+    #
+    # wrappers for the color change
+    #
+    # @param num Dummy parameter.
+    #
+    @hdebug.debug
+    def handleCol4Change(self,num):
+        self.handleColChange(3)
+    ## handleCol1_2_3_4Change
+    #
+    # wrappers for the color change
+    #
+    # @param num Dummy parameter.
+    #
+    @hdebug.debug
+    
+    ## handleColChange
+    #
+    # Handles a change in the color of the quadviews
+    #
+    # @param num indicates the quadview number.
+    #
+    @hdebug.debug 
+    def handleColChange(self,num):
+        col = QtGui.QColorDialog.getColor()
+        if col.isValid():
+            self.cols[num]=numpy.array(col.getRgbF()[:3])
+            self.addColorsToButtons()
+            self.updateQVImage()
+    
+    ## addColorsToButtons
+    #
+    # Adds colors to view buttons.
+    #
+    @hdebug.debug 
+    def addColorsToButtons(self):
+        colObjs = [self.colObj_1,self.colObj_2,self.colObj_3,self.colObj_4]
+        for i in range(len(colObjs)):
+            col_value = self.cols[i]
+            col_=QtGui.QColor()
+            col_.setRgbF(col_value[0],col_value[1],col_value[2])
+            colObjs[i].setStyleSheet("QWidget { background-color: %s }" % col_.name())
+    
+    ## rescale_to_255_RGB
+    #
+    # Constructs pixelmaps from quadview frames using colors.
+    # 
+    # @param frame_ is a numpy.array with the view images
+    # @param cols is a numpy.array with the colors in RGB ranging in [0,1]
+    # @param pixmap_min contrast minimums for each view
+    @hdebug.debug 
+    def rescale_to_255_RGB(self,frame_,cols,pixmap_min,pixmap_max):
+        # rescale to min max each view: [0,1]
+        frame_=frame_.astype(float)
+        for i in range(len(frame_)):
+            frame_[i]=(frame_[i]-float(pixmap_min[i]))/float(pixmap_max[i] - pixmap_min[i])
+        frame_[(frame_>1.)]=1.
+        frame_[(frame_<0.)]=0.
+        # contract to color space: [0,1]
+        frame = numpy.dot(numpy.transpose(frame_),cols)
+        # Rescale & convert to 8bit
+        frame = numpy.ascontiguousarray(frame, dtype = numpy.float32)
+        frame = 255.0 * frame
+        frame = frame.astype(numpy.uint8)
+        
+        # Create the pixmap
+        w, h = frame.shape[:2]
+        image_ = QtGui.QImage(frame.data, h, w, h*3, QtGui.QImage.Format_RGB888)
+        image_.ndarray = frame
+        pixmap = QtGui.QPixmap.fromImage(image_)
+        return pixmap
+
+    ## addImageOriginal
+    #
+    # Once obtained an image from the capture this gives life to the QV dialog.
+    # 
+    @hdebug.debug 
+    def addImageOriginal(self,image):
+        #Disconnect if not image
+        if not image:
+            self.comm.commDisconnect()
+            return
+        print "Shot image for QuadView"
+        self.connectQV_On = True
+        #Construct and show the original capture
+        
+        # set contrast limits for captured image and the quadview composite if the quadview was not enabled 
+        self.pixmap_mins = [image.image_min for i in range(4)]
+        self.pixmap_maxs = [image.image_max for i in range(4)]
+        self.frame = image.data.copy()
+        # construct pixel map for captured image
+        pixmapOriginal = self.rescale_to_255_RGB(numpy.array([self.frame]),numpy.array([[1,1,1]]),self.pixmap_mins,self.pixmap_maxs)
+        # display the captured image in its frame - FullFrame
+        self.labelOriginal = QtGui.QLabel(self.FullFrame)
+        self.labelOriginal.setPixmap(pixmapOriginal)
+        self.labelOriginal.show()
+        
+        #Construct the draggable views
+        self.constructViews()
+        #Construct the final composite image
+        self.labelCombined = QtGui.QLabel(self.CombinedFrame)
+        #If quadview was used before use the previous settings else it uses the defaults for the captured image
+        if self.parent.QV_On:
+            self.pixmap_mins = self.parent.pixmap_mins
+            self.pixmap_maxs = self.parent.pixmap_maxs
+        self.updateQVImage()
+        #Add colors to buttons
+        self.addColorsToButtons()
+        #Connect and configure sliders and boxes
+        self.default_min_max = [self.pixmap_mins,self.pixmap_maxs]
+        self.connect_configure_sliders()
+        self.connect_configure_spin_boxes()
+        #Disconnect the comunication with Hal
+        self.comm.commDisconnect()
+    
+    ## updateViews
+    #
+    # Changes position and visibility of QV quadrants.
+    # 
+    @hdebug.debug 
+    def updateViews(self):
+        # Thi assumes the views have been constructed via constructViews
+        coords = self.views_coords
+        QVsize_x = self.QVsize_x
+        QVsize_y = self.QVsize_y
+        for i in range(len(self.Views)):
+            self.Views[i].setGeometry(QtCore.QRect(coords[i,0],coords[i,1],QVsize_x,QVsize_y))
+        # Deal with active views
+        self.activeViews = [self.Views[i] for i in range(self.nr_views)]
+        self.activeCols = self.cols[:self.nr_views]
+        for view in self.activeViews:
+            view.show()
+        # Deal with inactive views
+        self.inactiveViews = [self.Views[i] for i in range(self.nr_views,len(self.Views))]
+        for view in self.inactiveViews:
+            view.hide()
+        # Deal with sliders and spin boxes visibility
+        self.widgets=[self.widget_1,self.widget_2,self.widget_3,self.widget_4]
+        for widget in self.widgets[:self.nr_views]:
+            widget.show()
+        for widget in self.widgets[self.nr_views:]:
+            widget.hide()
+    
+    ## updateQVImage
+    #
+    # Constructs the draggable QV quadrants.
+    # 
+    @hdebug.debug 
+    def constructViews(self):
+        coords = self.views_coords
+        QVsize_x = self.QVsize_x
+        QVsize_y = self.QVsize_y
+        self.View1 = DragView(self.FullFrame,"View 1", [coords[0,0],coords[0,1],QVsize_x,QVsize_y],self)
+        self.View2 = DragView(self.FullFrame,"View 2", [coords[1,0],coords[1,1],QVsize_x,QVsize_y],self)
+        self.View3 = DragView(self.FullFrame,"View 3", [coords[2,0],coords[2,1],QVsize_x,QVsize_y],self)
+        self.View4 = DragView(self.FullFrame,"View 4", [coords[3,0],coords[3,1],QVsize_x,QVsize_y],self)
+        self.Views = [self.View1,self.View2,self.View3,self.View4]
+        self.updateViews()
+    
+    ## updateQVImage
+    #
+    # Constructs the QV composite image by deciding how to trim and combine the initial capture.
+    # 
+    @hdebug.debug  
+    def updateQVImage(self):
+        # get coordinates assuming the views have been constructed
+        self.views_coords = numpy.array([view.getCoordinates() for view in self.Views])
+ 
+        # prepare slices
+        self.frames = []
+        self.finalTrims = []
+        for i in range(self.nr_views):
+            base = numpy.zeros([self.QVsize_x,self.QVsize_y])
+            
+            start_x = self.views_coords[i,0]
+            start_y = self.views_coords[i,1]
+            
+            # image coordinates
+            coords_frame_xmin = min(max(0,start_x),self.frame.shape[0])
+            coords_frame_ymin = min(max(0,start_y),self.frame.shape[1])
+            coords_frame_xmax = max(min(self.frame.shape[0],start_x+self.QVsize_x),0)
+            coords_frame_ymax = max(min(self.frame.shape[1],start_y+self.QVsize_y),0)
+            # view coordinates
+            coords_view_xmin = coords_frame_xmin - start_x
+            coords_view_ymin = coords_frame_ymin - start_y
+            coords_view_xmax = coords_frame_xmax - start_x
+            coords_view_ymax = coords_frame_ymax - start_y
+            #combine and append view capture from image
+            base[coords_view_xmin:coords_view_xmax,coords_view_ymin:coords_view_ymax]=self.frame[coords_frame_xmin:coords_frame_xmax,coords_frame_ymin:coords_frame_ymax]
+            self.finalTrims.append([coords_view_xmin,coords_view_xmax,coords_view_ymin,coords_view_ymax,coords_frame_xmin,coords_frame_xmax,coords_frame_ymin,coords_frame_ymax])
+            self.frames.append(base)
+        self.frames = numpy.array(self.frames)
+        self.finalTrims = numpy.array(self.finalTrims)
+        
+        # prepare and update pixmap
+        self.labelCombined.setGeometry(QtCore.QRect(0, 0, self.QVsize_x,self.QVsize_y))
+        pixmapCombined = self.rescale_to_255_RGB(self.frames,self.activeCols,self.pixmap_mins,self.pixmap_maxs)
+        self.labelCombined.setPixmap(pixmapCombined)
+        self.labelCombined.show()
+
+    ## dump_save
+    #
+    # Save QV paramaters to the window parrent upon close of dialog.
+    # 
+    @hdebug.debug    
+    def dump_save(self):
+        self.parent.activeCols = self.activeCols
+        self.parent.cols = self.cols
+        self.parent.nr_views = self.nr_views
+        self.parent.views_coords = self.views_coords
+        self.parent.QVsize_x = self.QVsize_x
+        self.parent.QVsize_y = self.QVsize_y
+        self.parent.finalTrims = self.finalTrims
+        self.parent.QV_On = True
+        self.parent.pixmap_mins = self.pixmap_mins
+        self.parent.pixmap_maxs = self.pixmap_maxs
+        
 class AdjustContrastDialog(QtGui.QDialog, AdjustContrastDialog_Ui):
     ## __init__
     #
     # @param title_text The text of the title of the dialog box
-    # @param default_min_max The starting minimum and maximum values
+    # @param default_min_max The starting minimum and maximum values. Note these have been updated to handle QuadView
     # @param scale_min_max The minimum and maximum allowed values
     # @param parent (Optional) The PyQt parent of this object, default is None.
     #
     @hdebug.debug
     def __init__(self, parent = None,
                  title_text = "Adjust Contrast",
-                 default_min_max = [0, 16000],
-                 scale_min_max = [0, 16000],
+                 default_min_max = [[0,0,0,0], [16000,16000,16000,16000]],
+                 scale_min_max = [0, 16000]
                  ):
         QtGui.QDialog.__init__(self,parent)
         self.setupUi(self)
 
         # Update window title.
         self.setWindowTitle(title_text)
+        
+        # Internalize variables.
+        self.parent = parent
+        self.default_min_max = default_min_max
+        self.scale_min_max = scale_min_max
+        
+        # comms for sliders and their spin boxes
+        self.high_contrast_sliders = [self.high_contrast_slider_1,self.high_contrast_slider_2,self.high_contrast_slider_3,self.high_contrast_slider_4]
+        self.low_contrast_sliders = [self.low_contrast_slider_1,self.low_contrast_slider_2,self.low_contrast_slider_3,self.low_contrast_slider_4]
+        self.high_spin_boxes = [self.high_spin_box_1,self.high_spin_box_2,self.high_spin_box_3,self.high_spin_box_4]
+        self.low_spin_boxes = [self.low_spin_box_1,self.low_spin_box_2,self.low_spin_box_3,self.low_spin_box_4]
 
-        # Configure the spin boxes.
-        self.high_spin_box.setRange(scale_min_max[0], scale_min_max[1])
-        self.high_spin_box.setValue(default_min_max[1])
-        self.high_spin_box.setSingleStep(1)
-        self.low_spin_box.setRange(scale_min_max[0], scale_min_max[1])
-        self.low_spin_box.setValue(default_min_max[0])
-        self.low_spin_box.setSingleStep(1)
+        self.connect_configure_sliders()
+        self.connect_configure_spin_boxes()
+        
+        # Deal with sliders and spin boxes visibility using the widget parents constructed in the qt designer
+        self.widgets=[self.widget_1,self.widget_2,self.widget_3,self.widget_4]
+        for widget in self.widgets[:self.parent.nr_views]:
+            widget.show()
+        for widget in self.widgets[self.parent.nr_views:]:
+            widget.hide()
 
-        # Configure the slider.
-        self.high_contrast_slider.setRange(scale_min_max[0], scale_min_max[1])
-        self.high_contrast_slider.setSliderPosition(default_min_max[1])
-        self.low_contrast_slider.setRange(scale_min_max[0], scale_min_max[1])
-        self.low_contrast_slider.setSliderPosition(default_min_max[0])
-
-        # Connect signals.
-        self.high_contrast_slider.sliderMoved.connect(self.handleHighSliderUpdate)
-        self.low_contrast_slider.sliderMoved.connect(self.handleLowSliderUpdate)
-        self.high_contrast_slider.sliderReleased.connect(self.handleHighSliderRelease)
-        self.low_contrast_slider.sliderReleased.connect(self.handleLowSliderRelease)
-
-        self.high_spin_box.valueChanged.connect(self.handleHighSpinBoxUpdate)
-        self.low_spin_box.valueChanged.connect(self.handleLowSpinBoxUpdate)
+    ## connect_configure_sliders
+    #
+    # Connect and configure sliders.
+    # 
+    @hdebug.debug    
+    def connect_configure_sliders(self):
+        counter = 0
+        for slider in self.high_contrast_sliders:
+            #connect
+            slider.sliderMoved.connect(self.handleHighSliderUpdate)
+            slider.sliderReleased.connect(self.handleHighSliderRelease)
+            #configure
+            slider.setRange(self.scale_min_max[0], self.scale_min_max[1])
+            slider.setSliderPosition(self.default_min_max[1][counter])
+            counter+=1
+        counter = 0
+        for slider in self.low_contrast_sliders:
+            #connect
+            slider.sliderMoved.connect(self.handleLowSliderUpdate)
+            slider.sliderReleased.connect(self.handleLowSliderRelease)
+            #configure
+            slider.setRange(self.scale_min_max[0], self.scale_min_max[1])
+            slider.setSliderPosition(self.default_min_max[0][counter])
+            counter+=1
+            
+    ## connect_configure_spin_boxes
+    #
+    # Connect and configure spinboxes associated with the sliders
+    # 
+    @hdebug.debug
+    def connect_configure_spin_boxes(self):
+        counter = 0
+        for box in self.high_spin_boxes:
+            #connect
+            box.valueChanged.connect(self.handleHighSpinBoxUpdate)
+            #configure
+            box.setRange(self.scale_min_max[0], self.scale_min_max[1])
+            box.setValue(self.default_min_max[1][counter])
+            box.setSingleStep(1)
+            counter+=1
+        counter = 0
+        for box in self.low_spin_boxes:
+            #connect
+            box.valueChanged.connect(self.handleLowSpinBoxUpdate)
+            #configure
+            box.setRange(self.scale_min_max[0], self.scale_min_max[1])
+            box.setValue(self.default_min_max[0][counter])
+            box.setSingleStep(1)
+            counter+=1
 
     ## getValues
     #
     # Return the values of the directory and file filter text boxes
     #
-    # @return The minimum and maximum contrast values set by the user
+    # @return The minimum and maximum contrast values set by the user for all quad-views
     @hdebug.debug
     def getValues(self):
-        return [self.low_spin_box.value(), self.high_spin_box.value()]
+        return [[box.value() for box in self.low_spin_boxes],[box.value() for box in self.high_spin_boxes]]
 
 
-    # handleHighSliderRelease
+    ## handleHighSliderRelease
     #
-    # Coerce slider value to new range upon release
+    # Coerce sliders value to new range upon release
     #
     @hdebug.debug
     def handleHighSliderRelease(self):
-        new_value = self.high_contrast_slider.value()
-        low_value = self.low_spin_box.value()
-        if new_value > low_value: # Coerce to larger than low contrast
-            self.high_spin_box.setValue(new_value)
-        else:
-            self.high_contrast_slider.setValue(low_value+1)
-            self.high_spin_box.setMinimum(low_value+1)
+        for i in range(len(self.high_contrast_sliders)):
+            high_contrast_slider = self.high_contrast_sliders[i]
+            low_spin_box = self.low_spin_boxes[i]
+            high_spin_box = self.high_spin_boxes[i]
+            
+            new_value = high_contrast_slider.value()
+            low_value = low_spin_box.value()
+            if new_value > low_value: # Coerce to larger than low contrast
+                high_spin_box.setValue(new_value)
+            else:
+                high_contrast_slider.setValue(low_value+1)
+                high_spin_box.setMinimum(low_value+1)
 
-    # handleLowSliderRelease
+    ## handleLowSliderRelease
     #
-    # Coerce slider value to new range upon release
+    # Coerce sliders value to new range upon release
     #
     @hdebug.debug
     def handleLowSliderRelease(self):
-        new_value = self.low_contrast_slider.value()
-        high_value = self.high_spin_box.value()
-        if new_value < high_value: # Coerce to smaller than high contrast
-            self.low_spin_box.setValue(new_value)
-        else:
-            self.low_contrast_slider.setValue(high_value-1)
-            self.low_spin_box.setMaximum(high_value-1)
+        for i in range(len(self.low_contrast_sliders)):
+            low_contrast_slider = self.low_contrast_sliders[i]
+            low_spin_box = self.low_spin_boxes[i]
+            high_spin_box = self.high_spin_boxes[i]
+            
+            new_value = low_contrast_slider.value()
+            high_value = high_spin_box.value()
+            if new_value < high_value: # Coerce to smaller than high contrast
+                low_spin_box.setValue(new_value)
+            else:
+                low_contrast_slider.setValue(high_value-1)
+                low_spin_box.setMaximum(high_value-1)
     
-    # handleHighSliderUpdate
+    ## handleHighSliderUpdate
     #
     # Handle movement of the high contrast slider
     #
     @hdebug.debug
     def handleHighSliderUpdate(self, dummy):
-        self.high_spin_box.setValue(self.high_contrast_slider.value())
+        for i in range(len(self.high_contrast_sliders)):
+            self.high_spin_boxes[i].setValue(self.high_contrast_sliders[i].value())
 
-    # handleLowSliderUpdate
+    ## handleLowSliderUpdate
     #
-    # Handle movement of the low contrast slider
+    # Handle movement of the low contrast sliders
     #
     @hdebug.debug
     def handleLowSliderUpdate(self, dummy):
-        self.low_spin_box.setValue(self.low_contrast_slider.value())
+        for i in range(len(self.low_contrast_sliders)):
+            self.low_spin_boxes[i].setValue(self.low_contrast_sliders[i].value())
 
-    # handleHighSpinBoxUpdate
+    ## handleHighSpinBoxUpdate
     #
     # Handle user adjustment of the high contrast spin box
     #
     @hdebug.debug
     def handleHighSpinBoxUpdate(self, dummy):
-        self.high_contrast_slider.setValue(self.high_spin_box.value())
-    
-    # handleLowSpinBoxUpdate
+        for i in range(len(self.high_contrast_sliders)):
+            self.high_contrast_sliders[i].setValue(self.high_spin_boxes[i].value())
+
+    ## handleLowSpinBoxUpdate
     #
     # Handle user adjustment of the low contrast spin box
     #
     @hdebug.debug
     def handleLowSpinBoxUpdate(self, dummy):
-        self.low_contrast_slider.setValue(self.low_spin_box.value())
+        for i in range(len(self.low_contrast_sliders)):
+            self.low_contrast_sliders[i].setValue(self.low_spin_boxes[i].value())
+        #self.pixmap_mins,self.pixmap_maxs=self.getValues()
+
+
+        
+
+        
+## findMO
+#
+# Find the magnification and offsets for the current objective.
+#
+# @param objective The microscope objective (a string).
+# @param spin_boxes A list of spin boxes.
+#
+# @return [magnification, offset in x, offset in y].
+#
+def findMO(objective, spin_boxes):
+    magnification = 1.0
+    x_offset = 0.0
+    y_offset = 0.0
+    for box in spin_boxes:
+        if (box.objective == objective):
+            if (box.box_type == "magnification"):
+                magnification = box.value()
+            elif (box.box_type == "xoffset"):
+                x_offset = box.value()
+            elif (box.box_type == "yoffset"):
+                y_offset = box.value()
+
+    return [magnification, x_offset, y_offset]
+
+## MagOffsetSpinBox
+#
+# Spin boxes that are used to update magnification & offset.
+#
+class MagOffsetSpinBox(QtGui.QDoubleSpinBox):
+    
+    moValueChange = QtCore.pyqtSignal(object, object, float)
+
+    ## __init__
+    #
+    # @param objective The objective the spin boxes are associated with.
+    # @param box_type What kind of spin box this is, one of "magnification", "xoffset" or "yoffset".
+    # @param initial_value The initial value for the spin box.
+    # @param parent (Optional) The PyQt parent of the spin box, default is None.
+    #
+    def __init__(self, objective, box_type, initial_value, parent = None):
+        QtGui.QDoubleSpinBox.__init__(self, parent)
+
+        self.box_type = box_type
+        self.objective = objective
+        
+        if (self.box_type == "magnification"):
+            self.setDecimals(2)
+            self.setMaximum(200.0)
+            self.setMinimum(1.0)
+            self.setSingleStep(0.01)
+        else:
+            self.setMaximum(10000.0)
+            self.setMinimum(-10000.0)
+
+        self.setValue(initial_value)
+
+        self.valueChanged.connect(self.handleValueChange)
+
+    ## handleValueChange
+    #
+    # Emits the moValueChange signal.
+    #
+    def handleValueChange(self, value):
+        self.moValueChange.emit(self.objective, self.box_type, value)
 
 
 ## Window
@@ -167,10 +902,12 @@ class Window(QtGui.QMainWindow):
         QtGui.QMainWindow.__init__(self, parent)
 
         # coordinate system setup
-        coord.Point.pixels_to_um = 1.0
+        coord.Point.pixels_to_um = parameters.pixels_to_um
 
         # variables
         self.current_center = coord.Point(0.0, 0.0, "um")
+        self.current_magnification = 1.0
+        self.current_objective = False
         self.current_offset = coord.Point(0.0, 0.0, "um")
         self.debug = parameters.debug
         self.file_filter = "\S+.dax"
@@ -181,9 +918,10 @@ class Window(QtGui.QMainWindow):
         self.stage_tracking_timer = QtCore.QTimer(self)
         self.taking_pictures = False
         self.snapshot_directory = self.parameters.directory
-        self.spin_boxes = []
         self.stage_tracking_timer.setInterval(500)
-
+        self.QV_On = False
+        self.nr_views = 1
+        self.fraction_overlap = 0.05
         # ui setup
         self.ui = steveUi.Ui_MainWindow()
         self.ui.setupUi(self)
@@ -203,10 +941,47 @@ class Window(QtGui.QMainWindow):
         self.ui.centralwidget.__class__.dragEnterEvent = self.dragEnterEvent
         self.ui.centralwidget.__class__.dropEvent = self.dropEvent
         self.ui.centralwidget.setAcceptDrops(True)
+        
+        # Initialize objectives.
+        objectives = []
+        for i in range(10):
+            mag = "mag" + str(i)
+            if hasattr(self.parameters, mag):
+                data = getattr(self.parameters, mag)
+                obj_name = data.split(",")[0]
+                objectives.append(data)
+                self.ui.magComboBox.addItem(obj_name, data)
+
+        # Create labels and spin boxes for objective settings.
+        self.spin_boxes = []
+        layout = QtGui.QGridLayout(self.ui.objectivesFrame)
+
+        for i, label_text in enumerate(["Objective", "Magnification", "X Offset", "Y Offset"]):
+            text_item = QtGui.QLabel(label_text, self.ui.objectivesFrame)
+            layout.addWidget(text_item, 0, i)
+
+        # The first objective is assumed to be the 100x & is not adjustable.
+        data = objectives[0].split(",")
+        self.current_objective = data[0]
+        for j, datum in enumerate(data):
+            text_item = QtGui.QLabel(datum, self.ui.objectivesFrame)
+            layout.addWidget(text_item, 1, j)
+
+        # The other objectives are adjustable.
+        for i, obj in enumerate(objectives[1:]):
+            data = obj.split(",")
+            text_item = QtGui.QLabel(data[0], self.ui.objectivesFrame)
+            layout.addWidget(text_item, i+2, 0)
+
+            for j, btype in enumerate(["magnification", "xoffset", "yoffset"]):
+                sbox = MagOffsetSpinBox(data[0], btype, float(data[j+1]))
+                layout.addWidget(sbox, i+2, j+1)
+                sbox.moValueChange.connect(self.handleMOValueChange)
+                self.spin_boxes.append(sbox)
 
         # Create a validator for scaleLineEdit.
-        self.scale_validator = QtGui.QDoubleValidator(1.0e-6, 1.0e+6, 6, self.ui.scaleLineEdit)
-        self.ui.scaleLineEdit.setValidator(self.scale_validator)
+        self.sce_validator = QtGui.QDoubleValidator(1.0e-6, 1.0e+6, 6, self.ui.scaleLineEdit)
+        self.ui.scaleLineEdit.setValidator(self.sce_validator)
 
         # Initialize view.
         self.view = mosaicView.MosaicView(parameters, self.ui.mosaicFrame)
@@ -233,12 +1008,12 @@ class Window(QtGui.QMainWindow):
 
         # Initialize communications.
         self.comm = capture.Capture(parameters)
-
         # signals
         self.ui.actionQuit.triggered.connect(self.quit)
         self.ui.actionAdjust_Contrast.triggered.connect(self.handleAdjustContrast)
+        self.ui.actionQuadView.triggered.connect(self.handleQuadView)
         self.ui.actionDelete_Images.triggered.connect(self.handleDeleteImages)
-        self.ui.actionLoad_Movie.triggered.connect(self.handleLoadMovie)
+        self.ui.actionLoad_Dax.triggered.connect(self.handleLoadDax)
         self.ui.actionLoad_Mosaic.triggered.connect(self.handleLoadMosaic)
         self.ui.actionLoad_Positions.triggered.connect(self.handleLoadPositions)
         self.ui.actionSave_Mosaic.triggered.connect(self.handleSaveMosaic)
@@ -248,17 +1023,18 @@ class Window(QtGui.QMainWindow):
         self.ui.foregroundOpacitySlider.valueChanged.connect(self.handleOpacityChange)
         self.ui.getStagePosButton.clicked.connect(self.handleGetStagePosButton)
         self.ui.imageGridButton.clicked.connect(self.handleImageGrid)
+        self.ui.magComboBox.currentIndexChanged.connect(self.handleObjectiveChange)
         self.ui.scaleLineEdit.textEdited.connect(self.handleScaleChange)
         self.ui.tabWidget.currentChanged.connect(self.handleTabChange)
         self.ui.trackStageCheckBox.stateChanged.connect(self.handleTrackStage)
         self.ui.xSpinBox.valueChanged.connect(self.handleGridChange)
         self.ui.ySpinBox.valueChanged.connect(self.handleGridChange)
-
+        self.ui.foverlapSpinBox.valueChanged.connect(self.handleFoverlapChange)
+        
         self.stage_tracking_timer.timeout.connect(self.handleStageTrackingTimer)
 
         self.view.addPosition.connect(self.addPositions)
         self.view.addSection.connect(self.addSection)
-        self.view.getObjective.connect(self.handleGetObjective)
         self.view.gotoPosition.connect(self.gotoPosition)
         self.view.mouseMove.connect(self.updateMosaicLabel)
         self.view.scaleChange.connect(self.updateScaleLineEdit)
@@ -268,18 +1044,12 @@ class Window(QtGui.QMainWindow):
         self.sections.takePictures.connect(self.takePictures)
 
         self.comm.captureComplete.connect(self.addImage)
-        self.comm.changeObjective.connect(self.handleChangeObjective)
         self.comm.disconnected.connect(self.handleDisconnected)
         self.comm.getPositionComplete.connect(self.handleGetPositionComplete)
-        self.comm.newObjectiveData.connect(self.handleNewObjectiveData)
-        self.comm.otherComplete.connect(self.handleOtherComplete)
+        self.comm.gotoComplete.connect(self.handleGotoComplete)
 
-        self.ui.objectivesGroupBox.valueChanged.connect(self.handleMOValueChange)
-        
-        # Try and get settings from HAL.
-        self.comm.commConnect()
-        self.comm.getSettings()
-        
+        self.handleObjectiveChange(0)
+
     ## addImage
     #
     # Adds a capture.Image object to the graphics scene. Checks self.picture_queue to see if there
@@ -295,12 +1065,36 @@ class Window(QtGui.QMainWindow):
             self.toggleTakingPicturesStatus(False)
             self.comm.commDisconnect()
             return
-
-        objective = image.parameters.get("mosaic." + image.parameters.get("mosaic.objective")).split(",")[0]
-        [magnification, x_offset, y_offset] = self.ui.objectivesGroupBox.getData(objective)
-        magnification = magnification * 0.01
-        self.current_offset = coord.Point(x_offset, y_offset, "um")
-        self.view.addImage(image, objective, magnification, self.current_offset)
+        ###Quad-view
+        if self.QV_On:
+            im_data=image.data.copy()
+            #cut and merge quadrans
+            image.activeCols = self.activeCols
+            image.cols = self.cols
+            image.nr_views = self.nr_views
+            image.views_coords = self.views_coords
+            image.QVsize_x = self.QVsize_x
+            image.QVsize_y = self.QVsize_y
+            image.finalTrims = self.finalTrims
+            image.QV_On = True
+            #prepare slices
+            frames = []
+            for coords in self.finalTrims:
+                base = numpy.zeros([self.QVsize_x,self.QVsize_y])
+                base[coords[0]:coords[1],coords[2]:coords[3]]=im_data[coords[4]:coords[5],coords[6]:coords[7]]
+                frames.append(base)
+            #update image
+            image.dataQV=numpy.array(frames)
+            image.height,image.width=image.dataQV.shape[1:]
+            image.pixmap_maxs = self.pixmap_maxs
+            image.pixmap_mins = self.pixmap_mins
+        else:
+            #This required for adjusting the global contrast of the images
+            image.pixmap_maxs = [image.image_max for i in range(4)]
+            image.pixmap_mins = [image.image_min for i in range(4)]
+        ###
+        
+        self.view.addImage(image, self.current_objective, self.current_magnification, self.current_offset)
         self.view.setCrosshairPosition(image.x_pix, image.y_pix)
         if (len(self.picture_queue) > 0):
             next_item = self.picture_queue[0]
@@ -310,8 +1104,8 @@ class Window(QtGui.QMainWindow):
                 next_y_um = self.current_center.y_um
             else:
                 [tx, ty] = next_item
-                next_x_um = self.current_center.x_um + 0.95 * float(image.width) * coord.Point.pixels_to_um * tx / magnification
-                next_y_um = self.current_center.y_um + 0.95 * float(image.height) * coord.Point.pixels_to_um * ty / magnification
+                next_x_um = self.current_center.x_um + (1.-self.fraction_overlap) * float(image.height) * self.parameters.pixels_to_um * tx / self.current_magnification
+                next_y_um = self.current_center.y_um + (1.-self.fraction_overlap) * float(image.width) * self.parameters.pixels_to_um * ty / self.current_magnification
             self.picture_queue = self.picture_queue[1:]
             self.comm.captureStart(next_x_um, next_y_um)
         else:
@@ -441,7 +1235,7 @@ class Window(QtGui.QMainWindow):
         current_contrast = self.view.getContrast()
         print "Current Contrast: " + str(current_contrast)
         if current_contrast[0] is None:
-            current_contrast = [0, 16000] # Default values for HAL: FIXME
+            current_contrast = [[0,0,0,0], [16000,16000,16000,16000]] # Default values for HAL: FIXME
  
         # Prepare and display dialog
         dialog = AdjustContrastDialog(self,
@@ -455,19 +1249,33 @@ class Window(QtGui.QMainWindow):
             self.view.changeContrast(newRange)
         else:
             return
-
-    ## handleChangeObjective
+        
+    ## handleQuadView
     #
-    # Handles the objective change signal from capture.
+    # Handles a request to use QuadView.
     #
-    # @param objective The name of the objective.
+    # @param boolean Dummy parameter.
     #
     @hdebug.debug
-    def handleChangeObjective(self, objective):
-        self.ui.objectivesGroupBox.changeObjective(objective)
-        [magnification, x_offset, y_offset] = self.ui.objectivesGroupBox.getData(objective)
-        self.current_offset = coord.Point(x_offset, y_offset, "um")
-
+    def handleQuadView(self, boolean):
+        # Prepare and display dialog but decide first whether the quadview was used in this session before
+        if self.QV_On:
+            dialog = QuadViewDialog(self,
+                                    "Quad View",
+                                    nr_views_ = self.nr_views,
+                                    QVsize_x_ = self.QVsize_x,
+                                    QVsize_y_ = self.QVsize_y,
+                                    views_coords_=self.views_coords,
+                                    cols_=self.cols,
+                                    default_min_max = [self.pixmap_mins,self.pixmap_maxs])
+        else:
+            dialog = QuadViewDialog(self,
+                                    "Quad View")
+        
+        if dialog.exec_():
+            print "QuadView On."
+        else:
+            return
     ## handleDeleteImages
     #
     # Handles the delete images action.
@@ -492,13 +1300,6 @@ class Window(QtGui.QMainWindow):
     def handleDisconnected(self):
         self.toggleTakingPicturesStatus(False)
 
-    ## handleGetObjective
-    #
-    @hdebug.debug
-    def handleGetObjective(self):
-        self.comm.commConnect()
-        self.comm.getObjective()
-        
     ## handleGetStagePosButton
     #
     # @param dummy Dummy parameter.
@@ -526,6 +1327,23 @@ class Window(QtGui.QMainWindow):
             self.ui.xStartPosSpinBox.setValue(a_point.x_um)
             self.ui.yStartPosSpinBox.setValue(a_point.y_um)
             self.comm.commDisconnect()
+    
+    ## handleGotoComplete
+    #
+    # Disconnects the communication once the stage reaches its desired location.
+    #
+    @hdebug.debug
+    def handleGotoComplete(self):
+        self.comm.commDisconnect()
+    ## handleFoverlapChange
+    #
+    # Handles a change in overlap of the images taken automatically by steve. 
+    #
+    # @param num Dummy parameter.
+    #
+    @hdebug.debug
+    def handleFoverlapChange(self, num):
+        self.fraction_overlap = self.ui.foverlapSpinBox.value()
 
     ## handleGridChange
     #
@@ -564,6 +1382,28 @@ class Window(QtGui.QMainWindow):
             self.picture_queue = []
             # addImage will handle reseting the ui and disconnecting comm
 
+    ## handleLoadDax
+    #
+    # Handles user request to load dax files.
+    #
+    # @param boolean Dummy parameter.
+    #
+    @hdebug.debug
+    def handleLoadDax(self, boolean):
+        # Open custom dialog to select files and frame number
+        [filenames, frame_num, file_filter] = qtRegexFileDialog.regexGetFileNames(directory = self.parameters.directory,
+                                                                                  regex = self.regexp_str,
+                                                                                  extensions = "*.dax")
+        if (filenames is not None) and (len(filenames) > 0):
+            print "Found " + str(len(filenames)) + " files matching " + str(file_filter) + " in " + os.path.dirname(filenames[0])
+            print "Loading frame: " + str(frame_num)
+
+            # Save regexp string for next time the dialog is opened
+            self.regexp_str = file_filter
+                
+            # Load dax
+            self.loadDax(filenames, frame_num)
+                                         
     ## handleLoadMosaic
     #
     # Handles a user request to load a mosaic.
@@ -577,29 +1417,7 @@ class Window(QtGui.QMainWindow):
                                                                 self.parameters.directory,
                                                                 "*.msc"))    
         self.loadMosaic(mosaic_filename)
-
-    ## handleLoadMovie
-    #
-    # Handles user request to load movie files.
-    #
-    # @param boolean Dummy parameter.
-    #
-    @hdebug.debug
-    def handleLoadMovie(self, boolean):
-        # Open custom dialog to select files and frame number
-        [filenames, frame_num, file_filter] = qtRegexFileDialog.regexGetFileNames(directory = self.parameters.directory,
-                                                                                  regex = self.regexp_str,
-                                                                                  extensions = ["*.dax", "*.tif", "*.spe"])
-        if (filenames is not None) and (len(filenames) > 0):
-            print "Found " + str(len(filenames)) + " files matching " + str(file_filter) + " in " + os.path.dirname(filenames[0])
-            print "Loading frame: " + str(frame_num)
-
-            # Save regexp string for next time the dialog is opened
-            self.regexp_str = file_filter
-                
-            # Load dax
-            self.loadMovie(filenames, frame_num)
-
+    
     ## handleLoadPositions
     #
     # Handles the load positions action.
@@ -620,28 +1438,47 @@ class Window(QtGui.QMainWindow):
     # Handles the moValueChange signal from the magnification and offset spin boxes.
     #
     # @param objective The objective associated with the spin box that was changed.
-    # @param pname The box type of the spin box that was changed.
+    # @param box_type The box type of the spin box that was changed.
     # @param value The new value of the spin box that was changed.
     #
     @hdebug.debug
-    def handleMOValueChange(self, objective, pname, value):
-        if (pname == "magnification"):
-            self.view.changeMagnification(objective, value/100.0)
-        elif (pname == "xoffset"):
+    def handleMOValueChange(self, objective, box_type, value):
+        if (box_type == "magnification"):
+            value = value/100.0
+            if (objective == self.current_objective):
+                self.current_magnification = value
+            self.view.changeMagnification(objective, value)
+        elif (box_type == "xoffset"):
+            if (objective == self.current_objective):
+                self.current_offset = coord.Point(value, self.current_offset.y_um, "um")
             self.view.changeXOffset(objective, coord.umToPix(value))
-        elif (pname == "yoffset"):
+        elif (box_type == "yoffset"):
+            if (objective == self.current_objective):
+                self.current_offset = coord.Point(self.current_offset.x_um, value, "um")
             self.view.changeYOffset(objective, coord.umToPix(value))
-            
-    ## handleNewObjectiveData
+        else:
+            print "unknown box type:", box_type
+
+    ## handleObjectiveChange
     #
-    # Handles adding a new objective to the list of available objectives.
+    # Handles the currentIndexChanged signal from the combo box that lists the objectives.
     #
-    # @param data An array containing the description and information for the new objective.
+    # @param mag_index The index of the newly selected objective.
     #
     @hdebug.debug
-    def handleNewObjectiveData(self, data):
-        self.ui.objectivesGroupBox.addObjective(data)
-        
+    def handleObjectiveChange(self, mag_index):
+        data = self.ui.magComboBox.itemData(mag_index).toString()
+        if data:
+            data = data.split(",")
+            if (mag_index == 0):
+                [mag, x_offset, y_offset] = map(float, data[1:])
+            else:
+                [mag, x_offset, y_offset] = findMO(data[0], self.spin_boxes)
+            mag = mag/100.0
+            self.current_objective = data[0]
+            self.current_magnification = mag
+            self.current_offset = coord.Point(x_offset, y_offset, "um")
+
     ## handleOpacityChange
     #
     # Handles the valueChanged signal from the foreground opacity slider.
@@ -651,12 +1488,6 @@ class Window(QtGui.QMainWindow):
     @hdebug.debug
     def handleOpacityChange(self, value):
         self.sections.changeOpacity(0.01*float(value))
-        
-    ## handleOtherComplete
-    #
-    @hdebug.debug
-    def handleOtherComplete(self):
-        self.comm.commDisconnect()
 
     ## handleSavePositions
     #
@@ -789,15 +1620,15 @@ class Window(QtGui.QMainWindow):
             self.stage_tracking_timer.stop()
             self.comm.commDisconnect()
 
-    ## loadMovie
+    ## loadDax
     #
-    # Handles loading movie files, which can be useful for retrospective analysis.
+    # Handles loading dax files, which can be useful for retrospective analysis.
     #
     # @param filenames A list of file names.
     # @param frame_num The frame number to load. Starts at 0. Default is 0.
     #
     @hdebug.debug
-    def loadMovie(self, filenames, frame_num = 0):
+    def loadDax(self, filenames, frame_num = 0):
 
         # Create progress bar
         progress_bar = QtGui.QProgressDialog("Loading " + str(len(filenames)) +  " Files ...",
@@ -970,15 +1801,14 @@ class Window(QtGui.QMainWindow):
     def quit(self, boolean):
         self.close()
 
-
 if __name__ == "__main__":
     app = QtGui.QApplication(sys.argv)
 
     # Load settings.
     if (len(sys.argv)==2):
-        parameters = params.parameters(sys.argv[1])
+        parameters = params.Parameters(sys.argv[1])
     else:
-        parameters = params.parameters("settings_default.xml")
+        parameters = params.Parameters("settings_default.xml")
 
     # Start logger.
     hdebug.startLogging(parameters.directory + "logs/", "steve")
